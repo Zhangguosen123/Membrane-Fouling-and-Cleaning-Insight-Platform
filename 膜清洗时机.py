@@ -27,8 +27,9 @@ PRESET_RAW_URLS = {
 }
 
 DEFAULT_FORCED_FLUX_RATIO = 0.70
-DEFAULT_INTERMEDIATE_MIN = 0.05
-DEFAULT_INTERMEDIATE_DROP = 0.20
+DEFAULT_PORE_MOUTH_MIN = 0.01
+DEFAULT_PORE_MOUTH_CHANGE = 0.25
+# Empirical demonstration settings, not validated universal thresholds.
 COMPLETE_TO_INTERMEDIATE_TRIGGER = 1.0
 
 USE_LOG_FIT = True
@@ -242,7 +243,10 @@ def resolve_preset_file(filename):
     )
 
 
-def read_csv_robust(path_or_buffer, encoding_list=("utf-8-sig", "utf-8", "gbk", "latin1")):
+def read_csv_robust(
+    path_or_buffer,
+    encoding_list=("utf-8-sig", "utf-8", "gbk", "latin1")
+):
     last_error = None
 
     for enc in encoding_list:
@@ -273,7 +277,10 @@ def normalize_cols_to_standard(df):
     for c in df.columns:
         k = norm_key(c)
 
-        if k in {"时间s", "时间(s)", "times", "time(s)", "time", "t", "时间"}:
+        if k in {
+            "时间s", "时间(s)", "times", "time(s)",
+            "time", "t", "时间"
+        }:
             new_names[c] = "Time (s)"
         elif k in {"实际通量", "通量", "flux", "j"}:
             new_names[c] = "Flux"
@@ -304,7 +311,11 @@ def clean_series(t, J):
     return t, J
 
 
-def dataframe_to_series(df, filename="uploaded.csv", encoding="uploaded"):
+def dataframe_to_series(
+    df,
+    filename="uploaded.csv",
+    encoding="uploaded"
+):
     df = normalize_cols_to_standard(df)
 
     if "Time (s)" not in df.columns or "Flux" not in df.columns:
@@ -313,14 +324,21 @@ def dataframe_to_series(df, filename="uploaded.csv", encoding="uploaded"):
             "'Time (s)' / 'time' and 'Flux' / 'J'."
         )
 
-    t_clean, J_clean = clean_series(df["Time (s)"].values, df["Flux"].values)
+    t_clean, J_clean = clean_series(
+        df["Time (s)"].values,
+        df["Flux"].values
+    )
 
     if len(J_clean) < MIN_STAGE_POINTS:
-        raise ValueError(f"{filename} does not contain enough valid data points for fitting.")
+        raise ValueError(
+            f"{filename} does not contain enough valid data points for fitting."
+        )
 
     J0 = float(J_clean[0])
     if J0 <= 0:
-        raise ValueError(f"The initial flux in {filename} is zero or negative.")
+        raise ValueError(
+            f"The initial flux in {filename} is zero or negative."
+        )
 
     return t_clean, J_clean, J0, filename, encoding
 
@@ -359,8 +377,14 @@ def calculate_metrics(J_obs, J_pred):
 
     return {
         "R2": round(float(r2), 3) if np.isfinite(r2) else np.nan,
-        "NRMSE": round(float(nrmse), 3) if np.isfinite(nrmse) else np.nan,
-        "MAPE": round(float(mape), 3) if np.isfinite(mape) else np.nan,
+        "NRMSE": (
+            round(float(nrmse), 3)
+            if np.isfinite(nrmse) else np.nan
+        ),
+        "MAPE": (
+            round(float(mape), 3)
+            if np.isfinite(mape) else np.nan
+        ),
     }
 
 
@@ -375,9 +399,15 @@ def build_observed_schedule(t):
     return {
         "t0": t0,
         "Tdata": Tdata,
-        "early_end": t0 + INDUSTRIAL_CHECKPOINTS["early_end"] * Tdata,
-        "middle_front_end": t0 + INDUSTRIAL_CHECKPOINTS["middle_front_end"] * Tdata,
-        "middle_end": t0 + INDUSTRIAL_CHECKPOINTS["middle_end"] * Tdata,
+        "early_end": (
+            t0 + INDUSTRIAL_CHECKPOINTS["early_end"] * Tdata
+        ),
+        "middle_front_end": (
+            t0 + INDUSTRIAL_CHECKPOINTS["middle_front_end"] * Tdata
+        ),
+        "middle_end": (
+            t0 + INDUSTRIAL_CHECKPOINTS["middle_end"] * Tdata
+        ),
         "late_end": t_end,
     }
 
@@ -416,9 +446,12 @@ def analyze_interval(t_abs, J_obs, label):
         "dominant_ratio": float(eta[dominant_idx]),
         "intermediate_ratio": float(eta[2]),
         "complete_ratio": float(eta[1]),
+        "pore_mouth_ratio": float(eta[1] + eta[2]),
         "cake_ratio": float(eta[3]),
         "complete_to_intermediate_ratio": (
-            float(eta[1] / eta[2]) if eta[2] > EPS else np.inf if eta[1] > EPS else 0.0
+            float(eta[1] / eta[2])
+            if eta[2] > EPS
+            else np.inf if eta[1] > EPS else 0.0
         ),
         "t_start": float(t_abs[0]),
         "t_end": float(t_abs[-1]),
@@ -435,8 +468,12 @@ def slice_time_window(t, J, start_time, end_time):
     if len(t_seg) >= MIN_STAGE_POINTS:
         return t_seg, J_seg
 
-    idx_start = int(np.searchsorted(t, start_time, side="left"))
-    idx_end = int(np.searchsorted(t, end_time, side="right"))
+    idx_start = int(
+        np.searchsorted(t, start_time, side="left")
+    )
+    idx_end = int(
+        np.searchsorted(t, end_time, side="right")
+    )
 
     idx_start = max(0, min(idx_start, len(t) - 1))
     idx_end = max(idx_start + MIN_STAGE_POINTS, idx_end)
@@ -472,7 +509,9 @@ def build_industrial_stage_analysis(t, J, observed_schedule):
 
     results = []
     for label, ratio_text, start_time, end_time, key in windows:
-        t_seg, J_seg = slice_time_window(t, J, start_time, end_time)
+        t_seg, J_seg = slice_time_window(
+            t, J, start_time, end_time
+        )
         res = analyze_interval(t_seg, J_seg, label)
         res["stage_ratio"] = ratio_text
         res["target_start"] = float(start_time)
@@ -500,21 +539,41 @@ def find_time_when_curve_below(t, J_pred, target_flux):
     if abs(j2 - j1) < EPS:
         return float(t2), first_idx
 
-    crossing_time = t1 + (t2 - t1) * (target_flux - j1) / (j2 - j1)
+    crossing_time = (
+        t1 + (t2 - t1) * (target_flux - j1) / (j2 - j1)
+    )
     return float(crossing_time), first_idx
 
 
-def find_flux_threshold_time_from_fit(params, J0, t0, Tdata, flux_ratio):
+def find_flux_threshold_time_from_fit(
+    params,
+    J0,
+    t0,
+    Tdata,
+    flux_ratio
+):
     t_rel_grid = np.linspace(0.0, float(Tdata), 800)
     J_grid = stage1_model(params, t_rel_grid, J0)
     target_flux = J0 * flux_ratio
 
-    crossing_rel_time, crossing_idx = find_time_when_curve_below(t_rel_grid, J_grid, target_flux)
+    crossing_rel_time, crossing_idx = find_time_when_curve_below(
+        t_rel_grid, J_grid, target_flux
+    )
 
     if crossing_rel_time is None:
-        return float(t0 + Tdata), float(J_grid[-1]), len(t_rel_grid) - 1, False
+        return (
+            float(t0 + Tdata),
+            float(J_grid[-1]),
+            len(t_rel_grid) - 1,
+            False,
+        )
 
-    return float(t0 + crossing_rel_time), float(target_flux), crossing_idx, True
+    return (
+        float(t0 + crossing_rel_time),
+        float(target_flux),
+        crossing_idx,
+        True,
+    )
 
 
 def build_flux_threshold_window(t, J, threshold_time):
@@ -522,10 +581,16 @@ def build_flux_threshold_window(t, J, threshold_time):
     end_time = float(threshold_time)
 
     if end_time <= start_time:
-        end_time = start_time + max((t[-1] - t[0]) * 0.05, EPS)
+        end_time = (
+            start_time + max((t[-1] - t[0]) * 0.05, EPS)
+        )
 
-    t_seg, J_seg = slice_time_window(t, J, start_time, min(end_time, float(t[-1])))
-    return analyze_interval(t_seg, J_seg, "Flux-threshold window")
+    t_seg, J_seg = slice_time_window(
+        t, J, start_time, min(end_time, float(t[-1]))
+    )
+    return analyze_interval(
+        t_seg, J_seg, "Flux-threshold window"
+    )
 
 
 def recommend_cleaning_strategy(eta):
@@ -553,20 +618,38 @@ def recommend_cleaning_strategy(eta):
             f"Recommended action: timely backwashing to disrupt pore-entrance bridging and the cake-membrane interface."
         )
 
-    return "Mixed fouling mechanisms are involved. A combined mild cleaning protocol is recommended."
+    return (
+        "Mixed fouling mechanisms are involved. "
+        "A combined mild cleaning protocol is recommended."
+    )
 
 
-def decide_backwash_timing(stage_results,
-                           observed_schedule,
-                           flux_threshold_time,
-                           flux_threshold_reached,
-                           flux_ratio,
-                           intermediate_threshold,
-                           intermediate_drop_threshold):
-    stage_by_key = {s.get("stage_key"): s for s in stage_results if s.get("success")}
+def decide_backwash_timing(
+    stage_results,
+    observed_schedule,
+    flux_threshold_time,
+    flux_threshold_reached,
+    flux_ratio,
+    pore_mouth_threshold,
+    pore_mouth_change_threshold
+):
+    stage_by_key = {
+        s.get("stage_key"): s
+        for s in stage_results
+        if s.get("success")
+    }
 
-    def cap_by_flux(candidate_time, candidate_stage, candidate_message, candidate_basis, rule_code):
-        if flux_threshold_reached and flux_threshold_time <= candidate_time:
+    def cap_by_flux(
+        candidate_time,
+        candidate_stage,
+        candidate_message,
+        candidate_basis,
+        rule_code
+    ):
+        if (
+            flux_threshold_reached
+            and flux_threshold_time <= candidate_time
+        ):
             return {
                 "triggered": True,
                 "decision_time": float(flux_threshold_time),
@@ -611,7 +694,10 @@ def decide_backwash_timing(stage_results,
     middle_back = stage_by_key.get("middle_back")
 
     if early is not None:
-        if early["complete_to_intermediate_ratio"] > COMPLETE_TO_INTERMEDIATE_TRIGGER:
+        if (
+            early["complete_to_intermediate_ratio"]
+            > COMPLETE_TO_INTERMEDIATE_TRIGGER
+        ):
             return cap_by_flux(
                 early_end,
                 "Early-stage backwash",
@@ -626,24 +712,28 @@ def decide_backwash_timing(stage_results,
                 "E-CI",
             )
 
-        if early["intermediate_ratio"] < intermediate_threshold:
+        if early["pore_mouth_ratio"] < pore_mouth_threshold:
             return cap_by_flux(
                 early_end,
                 "Early-stage backwash",
                 (
                     f"Backwashing is recommended at the actual early-stage endpoint ({early_end:.2f} s). "
-                    f"The early intermediate-blocking contribution is {early['intermediate_ratio'] * 100:.2f}%, "
-                    f"below the {intermediate_threshold * 100:.2f}% threshold."
+                    f"The early pore-mouth blocking contribution P is {early['pore_mouth_ratio'] * 100:.2f}%, "
+                    f"below the {pore_mouth_threshold * 100:.2f}% demonstration baseline."
                 ),
                 (
-                    "Low intermediate blocking in the early 25% data window suggests that interfacial bridging is weak. "
-                    "Early hydraulic backwashing is preferred before fouling consolidates."
+                    "P = complete-blocking contribution + intermediate-blocking contribution. "
+                    "The early P value is below the configured empirical demonstration baseline. "
+                    "This retained early-intervention rule is not a validated universal threshold."
                 ),
-                "E-IB",
+                "E-P",
             )
 
     if middle_front is not None:
-        if middle_front["complete_to_intermediate_ratio"] > COMPLETE_TO_INTERMEDIATE_TRIGGER:
+        if (
+            middle_front["complete_to_intermediate_ratio"]
+            > COMPLETE_TO_INTERMEDIATE_TRIGGER
+        ):
             return cap_by_flux(
                 mid_front_end,
                 "Middle first-half backwash",
@@ -659,25 +749,46 @@ def decide_backwash_timing(stage_results,
             )
 
         if early is not None:
-            drop = early["intermediate_ratio"] - middle_front["intermediate_ratio"]
-            if drop >= intermediate_drop_threshold:
+            p_early = early["pore_mouth_ratio"]
+            p_current = middle_front["pore_mouth_ratio"]
+
+            # Relative, nonnegative change.
+            # Undefined if the early reference is zero.
+            relative_change = (
+                abs(p_current - p_early) / p_early
+                if p_early > EPS else None
+            )
+
+            if (
+                relative_change is not None
+                and relative_change >= pore_mouth_change_threshold
+            ):
                 return cap_by_flux(
                     mid_front_end,
                     "Middle first-half backwash",
                     (
                         f"Backwashing is recommended at the middle first-half endpoint ({mid_front_end:.2f} s). "
-                        f"Intermediate blocking decreases by {drop * 100:.2f} percentage points from early stage "
-                        f"to the first half of middle stage."
+                        f"Pore-mouth blocking P changes from {p_early * 100:.2f}% "
+                        f"to {p_current * 100:.2f}% from early stage to the first half of middle stage. "
+                        f"The relative nonnegative change is {relative_change * 100:.2f}%, "
+                        f"reaching the {pore_mouth_change_threshold * 100:.2f}% demonstration trigger."
                     ),
                     (
-                        "A clear decline in intermediate blocking suggests a transition from pore-entrance/interfacial "
-                        "blocking to cake-layer control. Backwashing at this checkpoint helps avoid cake compaction."
+                        "P = complete-blocking contribution + intermediate-blocking contribution. "
+                        "Relative nonnegative change = abs(P_current - P_early) / P_early. "
+                        "Increases and decreases are both included; this is not a percentage-point difference. "
+                        "The reference is the fitted early P, not the configured minimum. "
+                        "The relative-change rule is skipped when early P is zero or numerically negligible. "
+                        "This is an empirical demonstration rule, not a validated universal threshold."
                     ),
-                    "MF-IB-DROP",
+                    "MF-P-CHANGE",
                 )
 
     if middle_back is not None:
-        if middle_back["complete_to_intermediate_ratio"] > COMPLETE_TO_INTERMEDIATE_TRIGGER:
+        if (
+            middle_back["complete_to_intermediate_ratio"]
+            > COMPLETE_TO_INTERMEDIATE_TRIGGER
+        ):
             return cap_by_flux(
                 mid_end,
                 "Middle second-half backwash",
@@ -707,16 +818,24 @@ def decide_backwash_timing(stage_results,
     )
 
 
-def analyze_dataset(t, J, J0, filename, data_type,
-                    flux_ratio,
-                    intermediate_threshold,
-                    intermediate_drop_threshold):
+def analyze_dataset(
+    t,
+    J,
+    J0,
+    filename,
+    data_type,
+    flux_ratio,
+    pore_mouth_threshold,
+    pore_mouth_change_threshold
+):
     observed_schedule = build_observed_schedule(t)
 
     t_rel = t - t[0]
     full_params = fit_model(t_rel, J, J0)
     full_pred = stage1_model(full_params, t_rel, J0)
-    full_eta = calculate_mechanism_contribution(full_params, t_rel, J0)
+    full_eta = calculate_mechanism_contribution(
+        full_params, t_rel, J0
+    )
     full_metrics = calculate_metrics(J, full_pred)
 
     full_dom_idx = int(np.argmax(full_eta))
@@ -730,7 +849,12 @@ def analyze_dataset(t, J, J0, filename, data_type,
         "dominant_ratio": float(full_eta[full_dom_idx]),
     }
 
-    flux_threshold_time, flux_threshold_flux, _, flux_threshold_reached = find_flux_threshold_time_from_fit(
+    (
+        flux_threshold_time,
+        flux_threshold_flux,
+        _,
+        flux_threshold_reached,
+    ) = find_flux_threshold_time_from_fit(
         full_params,
         J0,
         observed_schedule["t0"],
@@ -738,8 +862,12 @@ def analyze_dataset(t, J, J0, filename, data_type,
         flux_ratio,
     )
 
-    threshold_stage = build_flux_threshold_window(t, J, flux_threshold_time)
-    industrial_stages = build_industrial_stage_analysis(t, J, observed_schedule)
+    threshold_stage = build_flux_threshold_window(
+        t, J, flux_threshold_time
+    )
+    industrial_stages = build_industrial_stage_analysis(
+        t, J, observed_schedule
+    )
 
     decision = decide_backwash_timing(
         industrial_stages,
@@ -747,8 +875,8 @@ def analyze_dataset(t, J, J0, filename, data_type,
         flux_threshold_time,
         flux_threshold_reached,
         flux_ratio,
-        intermediate_threshold,
-        intermediate_drop_threshold,
+        pore_mouth_threshold,
+        pore_mouth_change_threshold,
     )
 
     return {
@@ -768,8 +896,8 @@ def analyze_dataset(t, J, J0, filename, data_type,
         "flux_threshold_flux": flux_threshold_flux,
         "flux_threshold_reached": flux_threshold_reached,
         "flux_ratio": flux_ratio,
-        "intermediate_threshold": intermediate_threshold,
-        "intermediate_drop_threshold": intermediate_drop_threshold,
+        "pore_mouth_threshold": pore_mouth_threshold,
+        "pore_mouth_change_threshold": pore_mouth_change_threshold,
         "full_strategy": recommend_cleaning_strategy(full["eta"]),
         "threshold_strategy": (
             recommend_cleaning_strategy(threshold_stage["eta"])
@@ -779,24 +907,37 @@ def analyze_dataset(t, J, J0, filename, data_type,
     }
 
 
-def analyze_preset_file(data_type, flux_ratio, intermediate_threshold, intermediate_drop_threshold):
+def analyze_preset_file(
+    data_type,
+    flux_ratio,
+    pore_mouth_threshold,
+    pore_mouth_change_threshold
+):
     t, J, J0, filename, _ = load_preset_data(data_type)
     return analyze_dataset(
         t, J, J0, filename, data_type,
         flux_ratio,
-        intermediate_threshold,
-        intermediate_drop_threshold,
+        pore_mouth_threshold,
+        pore_mouth_change_threshold,
     )
 
 
-def analyze_uploaded_file(uploaded_file, data_type, flux_ratio, intermediate_threshold, intermediate_drop_threshold):
+def analyze_uploaded_file(
+    uploaded_file,
+    data_type,
+    flux_ratio,
+    pore_mouth_threshold,
+    pore_mouth_change_threshold
+):
     df, enc = read_csv_robust(uploaded_file)
-    t, J, J0, filename, _ = dataframe_to_series(df, uploaded_file.name, enc)
+    t, J, J0, filename, _ = dataframe_to_series(
+        df, uploaded_file.name, enc
+    )
     return analyze_dataset(
         t, J, J0, filename, data_type,
         flux_ratio,
-        intermediate_threshold,
-        intermediate_drop_threshold,
+        pore_mouth_threshold,
+        pore_mouth_change_threshold,
     )
 
 
@@ -805,12 +946,19 @@ def analyze_uploaded_file(uploaded_file, data_type, flux_ratio, intermediate_thr
 # ==============================================================================
 def draw_mechanism_pie(eta, title):
     sizes = [max(v * 100, 0.0) for v in eta]
-    labels = [f"{name} {value:.1f}%" for name, value in zip(MECH_NAMES, sizes) if value > 0]
+    labels = [
+        f"{name} {value:.1f}%"
+        for name, value in zip(MECH_NAMES, sizes)
+        if value > 0
+    ]
     values = [value for value in sizes if value > 0]
 
     fig, ax = plt.subplots(figsize=(5, 4))
     if sum(values) <= 0:
-        ax.text(0.5, 0.5, "No valid contribution", ha="center", va="center")
+        ax.text(
+            0.5, 0.5, "No valid contribution",
+            ha="center", va="center"
+        )
         ax.axis("off")
     else:
         ax.pie(values, labels=labels, startangle=90)
@@ -834,10 +982,14 @@ def make_fixed_stage_table(stage_results):
                 "Intermediate Blocking": percent(s["eta"][2]),
                 "Cake Filtration": percent(s["eta"][3]),
                 "Complete/Intermediate": (
-                    "Inf" if np.isinf(s["complete_to_intermediate_ratio"])
+                    "Inf"
+                    if np.isinf(s["complete_to_intermediate_ratio"])
                     else f"{s['complete_to_intermediate_ratio']:.3f}"
                 ),
-                "Dominant Mechanism": f"{s['dominant_mechanism']} ({s['dominant_ratio'] * 100:.1f}%)",
+                "Dominant Mechanism": (
+                    f"{s['dominant_mechanism']} "
+                    f"({s['dominant_ratio'] * 100:.1f}%)"
+                ),
                 "NRMSE": s["metrics"]["NRMSE"],
                 "MAPE": s["metrics"]["MAPE"],
                 "Status": "Completed",
@@ -871,8 +1023,21 @@ def draw_flux_curve(res):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.plot(t, J, "o", ms=3, color="gray", alpha=0.6, label="Observed Flux")
-    ax.plot(t, full["J_pred"], "-", lw=2.2, color="#d97706", label="Full-Process Fitting")
+    ax.plot(
+        t, J, "o",
+        ms=3,
+        color="gray",
+        alpha=0.6,
+        label="Observed Flux"
+    )
+    ax.plot(
+        t,
+        full["J_pred"],
+        "-",
+        lw=2.2,
+        color="#d97706",
+        label="Full-Process Fitting"
+    )
 
     if threshold_stage.get("success"):
         ax.plot(
@@ -881,7 +1046,10 @@ def draw_flux_curve(res):
             "-",
             lw=2.2,
             color="#16a34a",
-            label=f"Flux-Threshold Window Fitting ({res['flux_ratio'] * 100:.0f}% J0)",
+            label=(
+                "Flux-Threshold Window Fitting "
+                f"({res['flux_ratio'] * 100:.0f}% J0)"
+            ),
         )
 
     flux_line = res["J0"] * res["flux_ratio"]
@@ -890,7 +1058,10 @@ def draw_flux_curve(res):
         color="#dc2626",
         linestyle=":",
         lw=2,
-        label=f"Forced {res['flux_ratio'] * 100:.0f}% Initial Flux Reference",
+        label=(
+            f"Forced {res['flux_ratio'] * 100:.0f}% "
+            "Initial Flux Reference"
+        ),
     )
 
     ax.axvline(
@@ -915,10 +1086,18 @@ def draw_flux_curve(res):
         ("0.45Tdata", schedule["middle_front_end"]),
         ("0.65Tdata", schedule["middle_end"]),
     ]:
-        ax.axvline(x=x, color="#64748b", linestyle=":", alpha=0.5)
+        ax.axvline(
+            x=x,
+            color="#64748b",
+            linestyle=":",
+            alpha=0.5
+        )
         ax.text(
             x,
-            ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else np.max(J),
+            (
+                ax.get_ylim()[1]
+                if ax.get_ylim()[1] > 0 else np.max(J)
+            ),
             label,
             rotation=90,
             va="top",
@@ -933,7 +1112,10 @@ def draw_flux_curve(res):
                 s["t_end"],
                 color=stage_colors[i],
                 alpha=0.25,
-                label=s["stage_ratio"] + " Stage" if i == 0 else None,
+                label=(
+                    s["stage_ratio"] + " Stage"
+                    if i == 0 else None
+                ),
             )
 
     ax.set_xlabel("Time (s)")
@@ -978,31 +1160,45 @@ def main():
     )
     flux_ratio = flux_ratio_percent / 100.0
 
-    intermediate_threshold_percent = st.sidebar.slider(
-        "Early Intermediate-Blocking Minimum (%)",
-        min_value=1.0,
-        max_value=10.0,
-        value=5.0,
-        step=0.5,
+    pore_mouth_threshold_percent = st.sidebar.slider(
+        "Early Pore-Mouth Blocking Minimum (%)",
+        min_value=0.0,
+        max_value=1.87,
+        value=DEFAULT_PORE_MOUTH_MIN * 100.0,
+        step=0.01,
+        format="%.2f",
         help=(
-            "If the early-stage intermediate-blocking contribution is below this value, "
-            "backwashing is recommended at 0.25Tdata unless the flux threshold is reached earlier."
+            "P = complete-blocking contribution + intermediate-blocking contribution. "
+            "If early-stage P is below this empirical demonstration baseline, the existing "
+            "rule recommends backwashing at 0.25Tdata unless the flux threshold is reached earlier. "
+            "This baseline is not the denominator of the relative-change calculation."
         ),
     )
-    intermediate_threshold = intermediate_threshold_percent / 100.0
+    pore_mouth_threshold = pore_mouth_threshold_percent / 100.0
 
-    intermediate_drop_percent = st.sidebar.slider(
-        "Intermediate-Blocking Decline Trigger (%)",
-        min_value=5.0,
-        max_value=35.0,
-        value=20.0,
-        step=5.0,
+    pore_mouth_change_percent = st.sidebar.slider(
+        "Pore-Mouth Blocking Relative Change Trigger (%)",
+        min_value=24.22,
+        max_value=100.0,
+        value=DEFAULT_PORE_MOUTH_CHANGE * 100.0,
+        step=0.01,
+        format="%.2f",
         help=(
-            "If intermediate blocking decreases by more than this percentage from early stage "
-            "to the first half of middle stage, backwashing is recommended at 0.45Tdata."
+            "Relative nonnegative change = abs(P_current - P_early) / P_early. "
+            "If this value reaches the configured demonstration trigger from early stage "
+            "to the first half of middle stage, the existing rule recommends backwashing "
+            "at 0.45Tdata. Both increases and decreases count. "
+            "The calculation is skipped when early P is zero or numerically negligible."
         ),
     )
-    intermediate_drop_threshold = intermediate_drop_percent / 100.0
+    pore_mouth_change_threshold = (
+        pore_mouth_change_percent / 100.0
+    )
+
+    st.sidebar.caption(
+        "P controls are empirical demonstration settings for exploratory analysis, "
+        "not validated universal thresholds."
+    )
 
     st.sidebar.caption(
         "Stage checkpoints are calculated only from the actual time-series duration: "
@@ -1011,7 +1207,11 @@ def main():
 
     analysis_mode = st.sidebar.selectbox(
         "Analysis Mode",
-        ["Single Preset File", "Batch Analysis of Preset Files", "Upload Custom CSV"],
+        [
+            "Single Preset File",
+            "Batch Analysis of Preset Files",
+            "Upload Custom CSV"
+        ],
     )
 
     if "all_results" not in st.session_state:
@@ -1022,18 +1222,23 @@ def main():
 
     if analysis_mode == "Single Preset File":
         st.header("Single Preset File Analysis")
-        data_type = st.selectbox("Select Data Type", ["BSA", "HA", "SA", "Mixture"])
+        data_type = st.selectbox(
+            "Select Data Type",
+            ["BSA", "HA", "SA", "Mixture"]
+        )
 
         st.caption(f"Preset file: {PRESET_FILES[data_type]}")
 
         if st.button("Start Analysis"):
-            with st.spinner(f"Analyzing {PRESET_FILES[data_type]} ..."):
+            with st.spinner(
+                f"Analyzing {PRESET_FILES[data_type]} ..."
+            ):
                 try:
                     result = analyze_preset_file(
                         data_type,
                         flux_ratio,
-                        intermediate_threshold,
-                        intermediate_drop_threshold,
+                        pore_mouth_threshold,
+                        pore_mouth_change_threshold,
                     )
                     st.session_state.all_results = [result]
                 except Exception as e:
@@ -1041,7 +1246,10 @@ def main():
 
     elif analysis_mode == "Batch Analysis of Preset Files":
         st.header("Batch Analysis of Preset Files")
-        st.info("The app will analyze BSAdata1.csv, HAdata1.csv, SAdata1.csv, and Mixturedata1.csv.")
+        st.info(
+            "The app will analyze BSAdata1.csv, HAdata1.csv, "
+            "SAdata1.csv, and Mixturedata1.csv."
+        )
 
         if st.button("Start Batch Analysis"):
             all_results = []
@@ -1050,13 +1258,16 @@ def main():
 
             batch_types = ["BSA", "HA", "SA", "Mixture"]
             for i, data_type in enumerate(batch_types):
-                status_text.text(f"Analyzing ({i + 1}/{len(batch_types)}): {PRESET_FILES[data_type]}")
+                status_text.text(
+                    f"Analyzing ({i + 1}/{len(batch_types)}): "
+                    f"{PRESET_FILES[data_type]}"
+                )
                 try:
                     result = analyze_preset_file(
                         data_type,
                         flux_ratio,
-                        intermediate_threshold,
-                        intermediate_drop_threshold,
+                        pore_mouth_threshold,
+                        pore_mouth_change_threshold,
                     )
                 except Exception as e:
                     result = {
@@ -1067,7 +1278,9 @@ def main():
                     }
 
                 all_results.append(result)
-                progress_bar.progress((i + 1) / len(batch_types))
+                progress_bar.progress(
+                    (i + 1) / len(batch_types)
+                )
                 time.sleep(0.1)
 
             status_text.text("Batch analysis completed.")
@@ -1075,18 +1288,29 @@ def main():
 
     else:
         st.header("Upload Custom CSV")
-        upload_data_type = st.selectbox("Pollutant Type for Uploaded CSV", ["BSA", "HA", "SA", "Mixture"])
-        uploaded_file = st.file_uploader("Upload a CSV file containing time and flux data", type="csv")
+        upload_data_type = st.selectbox(
+            "Pollutant Type for Uploaded CSV",
+            ["BSA", "HA", "SA", "Mixture"]
+        )
+        uploaded_file = st.file_uploader(
+            "Upload a CSV file containing time and flux data",
+            type="csv"
+        )
 
-        if uploaded_file is not None and st.button("Analyze Uploaded File"):
-            with st.spinner(f"Analyzing {uploaded_file.name} ..."):
+        if (
+            uploaded_file is not None
+            and st.button("Analyze Uploaded File")
+        ):
+            with st.spinner(
+                f"Analyzing {uploaded_file.name} ..."
+            ):
                 try:
                     result = analyze_uploaded_file(
                         uploaded_file,
                         upload_data_type,
                         flux_ratio,
-                        intermediate_threshold,
-                        intermediate_drop_threshold,
+                        pore_mouth_threshold,
+                        pore_mouth_change_threshold,
                     )
                     st.session_state.all_results = [result]
                 except Exception as e:
@@ -1109,9 +1333,15 @@ def main():
                 "Initial Flux": "N/A",
                 "Actual Tdata (s)": "N/A",
                 "Full-Process Dominant Mechanism": "N/A",
-                "Flux Threshold": f"{flux_ratio_percent:.1f}% J0",
-                "Intermediate-Blocking Threshold": f"{intermediate_threshold_percent:.1f}%",
-                "Intermediate Decline Trigger": f"{intermediate_drop_percent:.1f}%",
+                "Flux Threshold": (
+                    f"{flux_ratio_percent:.1f}% J0"
+                ),
+                "Pore-Mouth Blocking Threshold": (
+                    f"{pore_mouth_threshold_percent:.2f}%"
+                ),
+                "Pore-Mouth Relative Change Trigger": (
+                    f"{pore_mouth_change_percent:.2f}%"
+                ),
                 "Mechanism-Guided Cleaning Stage": "Analysis Failed",
                 "Recommended Time (s)": "N/A",
                 "Flux-Threshold Deadline (s)": "N/A",
@@ -1128,13 +1358,28 @@ def main():
             "Type": res["data_type"],
             "Initial Flux": f"{res['J0']:.6g}",
             "Actual Tdata (s)": f"{schedule['Tdata']:.2f}",
-            "Full-Process Dominant Mechanism": f"{full['dominant_mechanism']} ({full['dominant_ratio'] * 100:.1f}%)",
-            "Flux Threshold": f"{res['flux_ratio'] * 100:.1f}% J0",
-            "Intermediate-Blocking Threshold": f"{intermediate_threshold_percent:.1f}%",
-            "Intermediate Decline Trigger": f"{intermediate_drop_percent:.1f}%",
-            "Mechanism-Guided Cleaning Stage": decision["decision_stage"],
-            "Recommended Time (s)": f"{decision['decision_time']:.2f}",
-            "Flux-Threshold Deadline (s)": f"{res['flux_threshold_time']:.2f}",
+            "Full-Process Dominant Mechanism": (
+                f"{full['dominant_mechanism']} "
+                f"({full['dominant_ratio'] * 100:.1f}%)"
+            ),
+            "Flux Threshold": (
+                f"{res['flux_ratio'] * 100:.1f}% J0"
+            ),
+            "Pore-Mouth Blocking Threshold": (
+                f"{pore_mouth_threshold_percent:.2f}%"
+            ),
+            "Pore-Mouth Relative Change Trigger": (
+                f"{pore_mouth_change_percent:.2f}%"
+            ),
+            "Mechanism-Guided Cleaning Stage": (
+                decision["decision_stage"]
+            ),
+            "Recommended Time (s)": (
+                f"{decision['decision_time']:.2f}"
+            ),
+            "Flux-Threshold Deadline (s)": (
+                f"{res['flux_threshold_time']:.2f}"
+            ),
             "Status": decision.get("rule_code", "Triggered"),
         })
 
@@ -1154,11 +1399,16 @@ def main():
 
     for res in all_results:
         if not res.get("success"):
-            with st.expander(f"Analysis Failed: {res.get('filename', 'N/A')}"):
+            with st.expander(
+                f"Analysis Failed: {res.get('filename', 'N/A')}"
+            ):
                 st.error(res.get("error", "Unknown error"))
             continue
 
-        with st.expander(f"Detailed Report: {res['filename']}", expanded=True):
+        with st.expander(
+            f"Detailed Report: {res['filename']}",
+            expanded=True
+        ):
             full = res["full"]
             threshold_stage = res["threshold_stage"]
             decision = res["decision"]
@@ -1170,19 +1420,48 @@ def main():
                 st.subheader("Basic Information")
                 st.write(f"Data Type: {res['data_type']}")
                 st.write(f"Initial Flux: {res['J0']:.6g}")
-                st.write(f"Actual Total Time Tdata: {schedule['Tdata']:.2f} s")
-                st.write("Stage Checkpoints: 0.25Tdata / 0.45Tdata / 0.65Tdata")
-                st.write(f"0.25Tdata Early End: {schedule['early_end']:.2f} s")
-                st.write(f"0.45Tdata Middle First-Half End: {schedule['middle_front_end']:.2f} s")
-                st.write(f"0.65Tdata Middle End: {schedule['middle_end']:.2f} s")
-                st.write(f"Forced Flux Threshold: {res['flux_ratio'] * 100:.1f}% of J0")
+                st.write(
+                    "Actual Total Time Tdata: "
+                    f"{schedule['Tdata']:.2f} s"
+                )
+                st.write(
+                    "Stage Checkpoints: "
+                    "0.25Tdata / 0.45Tdata / 0.65Tdata"
+                )
+                st.write(
+                    "0.25Tdata Early End: "
+                    f"{schedule['early_end']:.2f} s"
+                )
+                st.write(
+                    "0.45Tdata Middle First-Half End: "
+                    f"{schedule['middle_front_end']:.2f} s"
+                )
+                st.write(
+                    "0.65Tdata Middle End: "
+                    f"{schedule['middle_end']:.2f} s"
+                )
+                st.write(
+                    "Forced Flux Threshold: "
+                    f"{res['flux_ratio'] * 100:.1f}% of J0"
+                )
 
             with col2:
                 st.subheader("Full-Process Fitting")
-                st.write(f"R2: {metric_text(full['metrics']['R2'])}")
-                st.write(f"NRMSE: {metric_text(full['metrics']['NRMSE'])}")
-                st.write(f"MAPE: {metric_text(full['metrics']['MAPE'])}")
-                st.write(f"Dominant Mechanism: {full['dominant_mechanism']}")
+                st.write(
+                    f"R2: {metric_text(full['metrics']['R2'])}"
+                )
+                st.write(
+                    "NRMSE: "
+                    f"{metric_text(full['metrics']['NRMSE'])}"
+                )
+                st.write(
+                    "MAPE: "
+                    f"{metric_text(full['metrics']['MAPE'])}"
+                )
+                st.write(
+                    "Dominant Mechanism: "
+                    f"{full['dominant_mechanism']}"
+                )
 
             with col3:
                 st.subheader("Backwashing Decision")
@@ -1190,9 +1469,18 @@ def main():
                     st.error(decision["message"])
                 else:
                     st.info(decision["message"])
-                st.write(f"Recommended Time: {decision['decision_time']:.2f} s")
-                st.write(f"Flux-Threshold Deadline: {res['flux_threshold_time']:.2f} s")
-                st.write(f"Decision Rule: {decision.get('rule_code', 'N/A')}")
+                st.write(
+                    "Recommended Time: "
+                    f"{decision['decision_time']:.2f} s"
+                )
+                st.write(
+                    "Flux-Threshold Deadline: "
+                    f"{res['flux_threshold_time']:.2f} s"
+                )
+                st.write(
+                    "Decision Rule: "
+                    f"{decision.get('rule_code', 'N/A')}"
+                )
 
             st.markdown("#### Decision Basis")
             st.write(decision["basis"])
@@ -1200,24 +1488,47 @@ def main():
             st.markdown("#### Time Reference")
             time_df = pd.DataFrame([{
                 "Pollutant": res["data_type"],
-                "Actual Tdata (s)": round(schedule["Tdata"], 2),
-                "0.25Tdata Early End (s)": round(schedule["early_end"], 2),
-                "0.45Tdata Middle First-Half End (s)": round(schedule["middle_front_end"], 2),
-                "0.65Tdata Middle End (s)": round(schedule["middle_end"], 2),
-                "Final Time (s)": round(schedule["late_end"], 2),
+                "Actual Tdata (s)": round(
+                    schedule["Tdata"], 2
+                ),
+                "0.25Tdata Early End (s)": round(
+                    schedule["early_end"], 2
+                ),
+                "0.45Tdata Middle First-Half End (s)": round(
+                    schedule["middle_front_end"], 2
+                ),
+                "0.65Tdata Middle End (s)": round(
+                    schedule["middle_end"], 2
+                ),
+                "Final Time (s)": round(
+                    schedule["late_end"], 2
+                ),
             }])
-            st.dataframe(time_df, use_container_width=True)
+            st.dataframe(
+                time_df,
+                use_container_width=True
+            )
 
             st.markdown("---")
             st.subheader("Industrial Stage Mechanism Analysis")
-            fixed_stage_df = make_fixed_stage_table(res["fixed_stages"])
-            st.dataframe(fixed_stage_df, use_container_width=True)
+            fixed_stage_df = make_fixed_stage_table(
+                res["fixed_stages"]
+            )
+            st.dataframe(
+                fixed_stage_df,
+                use_container_width=True
+            )
 
             st.markdown("---")
-            st.subheader("Mechanism Contribution Pies for Industrial Stages")
+            st.subheader(
+                "Mechanism Contribution Pies for Industrial Stages"
+            )
 
             stage_cols = st.columns(3)
-            for col, stage_res in zip(stage_cols, res["fixed_stages"]):
+            for col, stage_res in zip(
+                stage_cols,
+                res["fixed_stages"]
+            ):
                 with col:
                     if stage_res.get("success"):
                         draw_mechanism_pie(
@@ -1225,29 +1536,49 @@ def main():
                             f"{stage_res['label']}",
                         )
                     else:
-                        st.warning(stage_res.get("error", "Stage analysis failed."))
+                        st.warning(
+                            stage_res.get(
+                                "error",
+                                "Stage analysis failed."
+                            )
+                        )
 
             st.markdown("---")
-            st.subheader("Full Process and Flux-Threshold Window")
+            st.subheader(
+                "Full Process and Flux-Threshold Window"
+            )
 
             col1, col2 = st.columns(2)
 
             with col1:
-                draw_mechanism_pie(full["eta"], "Full-Process Mechanism Contribution")
+                draw_mechanism_pie(
+                    full["eta"],
+                    "Full-Process Mechanism Contribution"
+                )
                 st.info(res["full_strategy"])
 
             with col2:
                 if threshold_stage.get("success"):
                     draw_mechanism_pie(
                         threshold_stage["eta"],
-                        f"Flux-Threshold Window Contribution ({res['flux_ratio'] * 100:.0f}% J0)",
+                        (
+                            "Flux-Threshold Window Contribution "
+                            f"({res['flux_ratio'] * 100:.0f}% J0)"
+                        ),
                     )
                     st.info(res["threshold_strategy"])
                 else:
-                    st.warning(threshold_stage.get("error", "Insufficient data in flux-threshold window."))
+                    st.warning(
+                        threshold_stage.get(
+                            "error",
+                            "Insufficient data in flux-threshold window."
+                        )
+                    )
 
             st.markdown("---")
-            st.subheader("Flux Decay Fitting and Cleaning Intervention Point")
+            st.subheader(
+                "Flux Decay Fitting and Cleaning Intervention Point"
+            )
             draw_flux_curve(res)
 
 
