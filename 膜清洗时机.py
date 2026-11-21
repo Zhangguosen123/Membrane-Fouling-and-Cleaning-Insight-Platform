@@ -1,5 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Backwashing demonstration with explicitly constrained mechanism decomposition."""
+"""
+Membrane Fouling and Cleaning Insight Platform
+
+本版：
+1. 保留0.25T、0.45T、0.65T阶段检查及展示。
+2. 仅删除“完全堵塞/中间堵塞 > 1”的冲洗触发规则。
+3. 通量阈值范围50%–70% J0，默认50% J0。
+4. P基线范围0–1.87%，默认1%。
+5. P相对变动幅度范围24.22%–100%，默认25%。
+6. 恢复原始相对变动定义：
+   abs(P_middle_front - P_early) / P_early
+   升高和下降均计入。
+7. 保留0.65T阶段兜底，冲洗原因与实际最早事件对应。
+8. 滤饼主导属于明确施加的拟合约束，不直接修改饼图比例。
+
+时间输入单位：秒。
+T：预处理后保留数据的实际时间跨度。
+
+这是基于完整历史曲线的回溯演示：
+全程拟合和T均来自已提供的完整序列。
+"""
+
 from pathlib import Path
 import io
 import json
@@ -8,10 +29,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+
 from scipy.optimize import brentq, minimize
 
 
-VERSION = "cake-constrained-2026-11-21"
+VERSION = "cake-constrained-checkpoints-restored-2026-11-21"
 
 TITLE = "Membrane Fouling and Cleaning Insight Platform"
 
@@ -34,13 +56,18 @@ NAMES = [
     "Cake Filtration",
 ]
 
-COLORS = ["#90b4ce", "#f6bd60", "#e58f8f", "#71b59b"]
+COLORS = [
+    "#90b4ce",
+    "#f6bd60",
+    "#e58f8f",
+    "#71b59b",
+]
 
-# Parameter order: Ks, Kc, Kb, Ki, a, b
+# 参数顺序：Ks, Kc, Kb, Ki, a, b
 BOUNDS = [(0.0, 1.0)] * 4 + [(0.05, 1.0)] * 2
 
-LOW = np.array([bound[0] for bound in BOUNDS])
-HIGH = np.array([bound[1] for bound in BOUNDS])
+LOW = np.array([b[0] for b in BOUNDS])
+HIGH = np.array([b[1] for b in BOUNDS])
 
 EPS = 1e-12
 MIN_POINTS = 5
@@ -52,7 +79,6 @@ GA_ELITE = 2
 
 SEEDS = (42, 137, 2026)
 
-# Cake contribution must exceed each other contribution.
 DOMINANCE_MARGIN = 1e-6
 
 CONSTRAINT_TEXT = (
@@ -61,9 +87,9 @@ CONSTRAINT_TEXT = (
 )
 
 
-# ==============================================================================
-# Model and mechanism contributions
-# ==============================================================================
+# =============================================================================
+# Unified model and mechanism contributions
+# =============================================================================
 
 def log_flux_ratio(p, t, j0):
     ks, kc, kb, ki, a, b = p
@@ -77,18 +103,15 @@ def log_flux_ratio(p, t, j0):
 
 
 def model(p, t, j0):
-    log_ratio = log_flux_ratio(p, t, j0)
-    return j0 * np.exp(np.maximum(log_ratio, -700))
+    return j0 * np.exp(
+        np.maximum(log_flux_ratio(p, t, j0), -700)
+    )
 
 
 def shares(p, t_end, j0):
     """
-    Exact cumulative log-flux-decay contributions.
-
-    Di = -integral(si dt)
-    eta_i = Di / sum(Di)
-
-    These definitions do not multiply si by J(t).
+    四种机制的累积贡献。
+    使用各机制对 -log(J/J0) 的解析积分。
     """
     ks, kc, kb, ki, a, b = p
 
@@ -113,6 +136,7 @@ def cake_constraints(p, duration, j0):
     if not np.all(np.isfinite(eta)):
         return np.full(3, -1.0)
 
+    # 滤饼贡献必须大于其余三个单项贡献。
     return eta[3] - eta[:3] - DOMINANCE_MARGIN
 
 
@@ -138,32 +162,35 @@ def metrics(y, yh):
     return {
         "R2": (
             1 - float(np.sum((y - yh) ** 2)) / variance_sum
-            if variance_sum > EPS else np.nan
+            if variance_sum > EPS
+            else np.nan
         ),
         "NRMSE": (
             np.sqrt(mse) / spread
-            if spread > EPS else np.nan
+            if spread > EPS
+            else np.nan
         ),
         "MAPE": float(
             np.mean(
-                np.abs(y - yh) /
-                np.maximum(np.abs(y), floor)
+                np.abs(y - yh)
+                / np.maximum(np.abs(y), floor)
             )
         ),
     }
 
 
-# ==============================================================================
-# Cake-dominant constrained fitting
-# ==============================================================================
+# =============================================================================
+# Constrained fitting
+# =============================================================================
 
 def fit_curve(t, y):
     """
-    Search feasible cake-dominant solutions using multiple GA seeds,
-    then refine candidates with constrained optimization.
+    多随机种子遗传算法 + SLSQP约束优化。
 
-    Candidate ranking minimizes normalized MSE, equivalent to minimizing
-    NRMSE for the same observations.
+    仅在满足滤饼主导约束的候选解中，
+    根据归一化均方误差选择最佳结果。
+
+    不保证求得数学上的全局最优解。
     """
     j0 = float(y[0])
     duration = float(t[-1])
@@ -191,19 +218,11 @@ def fit_curve(t, y):
         )
 
         if feasible(p, duration, j0):
-            candidates.append((
-                loss(p),
-                p.copy(),
-                origin,
-            ))
+            candidates.append(
+                (loss(p), p.copy(), origin)
+            )
 
     def repair(p):
-        """
-        Construct feasible search candidates.
-
-        This changes candidate parameters during constrained optimization;
-        it does not overwrite displayed mechanism percentages.
-        """
         p = np.clip(p.copy(), LOW, HIGH)
 
         if feasible(p, duration, j0):
@@ -228,12 +247,11 @@ def fit_curve(t, y):
 
         return p
 
-    # Feasible initial candidates; final shares still come from fitting.
     decline = max(j0 / float(y[-1]), 1.0001)
 
     kc_est = np.clip(
-        (decline ** 2 - 1) /
-        (20 * j0 * j0 * duration),
+        (decline ** 2 - 1)
+        / (20 * j0 * j0 * duration),
         1e-9,
         1.0,
     )
@@ -251,14 +269,19 @@ def fit_curve(t, y):
         rng = np.random.default_rng(seed)
 
         pop = np.array([
-            repair(LOW + (HIGH - LOW) * rng.random(6))
+            repair(
+                LOW + (HIGH - LOW) * rng.random(6)
+            )
             for _ in range(GA_POP)
         ])
 
         pop[:len(pure_starts)] = np.array(pure_starts)
 
         for _ in range(GA_GEN):
-            scores = np.array([loss(p) for p in pop])
+            scores = np.array([
+                loss(p) for p in pop
+            ])
+
             order = np.argsort(scores)
 
             children = [
@@ -330,7 +353,7 @@ def fit_curve(t, y):
             },
         )
 
-        # Recheck actual feasibility rather than trusting solver status.
+        # 无论优化器状态如何，均独立检查最终解是否满足约束。
         keep(
             result.x,
             origin + " + constrained refinement",
@@ -347,7 +370,7 @@ def fit_curve(t, y):
     )
 
     eta = shares(p, duration, j0)
-    prediction = model(p, t, j0)
+    pred = model(p, t, j0)
 
     assert np.argmax(eta) == 3
     assert np.all(eta >= 0.0)
@@ -355,17 +378,17 @@ def fit_curve(t, y):
     return {
         "params": p,
         "eta": eta,
-        "pred": prediction,
-        "metrics": metrics(y, prediction),
+        "pred": pred,
+        "metrics": metrics(y, pred),
         "fit_origin": origin,
         "fit_loss": best_loss,
         "constraint": CONSTRAINT_TEXT,
     }
 
 
-# ==============================================================================
-# Data loading and preprocessing
-# ==============================================================================
+# =============================================================================
+# Input and preprocessing
+# =============================================================================
 
 def read_csv_bytes(raw):
     last_error = None
@@ -396,14 +419,12 @@ def load_preset(kind):
     name = PRESETS[kind]
     base = Path(__file__).resolve().parent
 
-    folders = (
+    for folder in (
         base,
         base / "data",
         base / "model_data",
         base / "模型数据",
-    )
-
-    for folder in folders:
+    ):
         path = folder / name
 
         if path.exists():
@@ -431,19 +452,28 @@ def clean_data(raw):
             .lower()
         )
 
-        key = (
-            key.replace("（", "(")
-            .replace("）", ")")
+        key = key.replace(
+            "（", "("
+        ).replace(
+            "）", ")"
         )
 
         if key in {
-            "时间s", "时间(s)", "times",
-            "time(s)", "time", "t", "时间",
+            "时间s",
+            "时间(s)",
+            "times",
+            "time(s)",
+            "time",
+            "t",
+            "时间",
         }:
             rename[col] = "time"
 
         elif key in {
-            "实际通量", "通量", "flux", "j",
+            "实际通量",
+            "通量",
+            "flux",
+            "j",
         }:
             rename[col] = "flux"
 
@@ -459,33 +489,37 @@ def clean_data(raw):
         errors="coerce",
     )
 
-    valid = (
+    d = d[
         np.isfinite(d["time"])
         & np.isfinite(d["flux"])
         & (d["flux"] > 0)
-    )
-
-    d = d[valid]
+    ]
 
     d = (
-        d.groupby("time", as_index=False)["flux"]
+        d.groupby(
+            "time",
+            as_index=False,
+        )["flux"]
         .mean()
         .sort_values("time")
     )
 
+    # 保留原程序末尾1%截除处理。
     if len(d) > 10:
-        retain = max(
+        retained = max(
             int(round(len(d) * 0.99)),
             MIN_POINTS,
         )
-        d = d.iloc[:retain]
+        d = d.iloc[:retained]
 
     if len(d) < MIN_POINTS:
         raise ValueError(
             "At least five valid observations are required."
         )
 
-    absolute_start = float(d["time"].iloc[0])
+    absolute_start = float(
+        d["time"].iloc[0]
+    )
 
     t = (
         d["time"].to_numpy(float)
@@ -502,14 +536,23 @@ def clean_data(raw):
     return t, y, absolute_start
 
 
-# ==============================================================================
-# Windows and flux crossing
-# ==============================================================================
+# =============================================================================
+# Window analysis and flux crossing
+# =============================================================================
 
 def analyze_window(
-    t, y, start, end, label, key
+    t,
+    y,
+    start,
+    end,
+    label,
+    key,
 ):
-    mask = (t >= start) & (t <= end)
+    mask = (
+        (t >= start)
+        & (t <= end)
+    )
+
     ts = t[mask]
     ys = y[mask]
 
@@ -535,16 +578,18 @@ def analyze_window(
     )
 
     try:
-        fit = fit_curve(
-            ts - ts[0],
-            ys,
+        result.update(
+            fit_curve(
+                ts - ts[0],
+                ys,
+            )
         )
-
-        result.update(fit)
 
         result.update(
             success=True,
-            P=float(result["eta"][1:3].sum()),
+            P=float(
+                result["eta"][1:3].sum()
+            ),
         )
 
     except ValueError as exc:
@@ -554,9 +599,15 @@ def analyze_window(
 
 
 def flux_crossing(
-    p, duration, j0, ratio
+    p,
+    duration,
+    j0,
+    ratio,
 ):
-    if float(model(p, duration, j0)) > ratio * j0:
+    if (
+        float(model(p, duration, j0))
+        > ratio * j0
+    ):
         return None
 
     return float(
@@ -572,25 +623,26 @@ def flux_crossing(
     )
 
 
-# ==============================================================================
-# Decision rules
-# ==============================================================================
+# =============================================================================
+# Backwashing decision
+# =============================================================================
 
 def decide(
     stages,
     flux_time,
     flux_ratio,
     p_min,
-    decline_min,
+    change_min,
+    duration,
 ):
     """
-    Only three rule families:
-      F: hard flux threshold
-      P-BASELINE: early P below the configured baseline
-      P-DECLINE: relative P decline reaches the configured threshold
+    保留原阶段规则：
+    F：通量阈值。
+    E-P：0.25T早期P基线。
+    MF-P-CHANGE：0.45T相对变动。
+    M-END：0.65T兜底。
 
-    No complete/intermediate ratio rule.
-    No mandatory 0.65Tdata fallback.
+    完全/中间比值不参与决策。
     """
     candidates = []
     checks = []
@@ -603,7 +655,8 @@ def decide(
         "Reached": flux_time is not None,
         "Time (min)": (
             flux_time / 60
-            if flux_time is not None else np.nan
+            if flux_time is not None
+            else np.nan
         ),
     })
 
@@ -611,9 +664,10 @@ def decide(
         candidates.append({
             "code": "F",
             "time": flux_time,
+            "stage": "Hard flux threshold",
             "reason": (
-                "Hard flux threshold: fitted J/J0 reaches "
-                f"{flux_ratio:.0%}."
+                "Hard flux threshold: fitted J/J0 "
+                f"reaches {flux_ratio:.0%}."
             ),
         })
 
@@ -628,7 +682,9 @@ def decide(
     if early is None:
         checks.append({
             "Rule": "P",
-            "Condition": "Early reference unavailable",
+            "Condition": (
+                "Early reference unavailable"
+            ),
             "Reached": False,
             "Time (min)": np.nan,
         })
@@ -640,7 +696,8 @@ def decide(
         checks.append({
             "Rule": "P-BASELINE",
             "Condition": (
-                f"Early P={p0:.4%} < {p_min:.2%}"
+                f"Early P={p0:.4%} "
+                f"< {p_min:.2%}"
             ),
             "Reached": low_p,
             "Time (min)": (
@@ -650,57 +707,48 @@ def decide(
 
         if low_p:
             candidates.append({
-                "code": "P-BASELINE",
+                "code": "E-P",
                 "time": early["available_time"],
+                "stage": (
+                    "Early endpoint (0.25T)"
+                ),
                 "reason": (
                     f"Early P={p0:.4%} is below "
                     f"the {p_min:.2%} baseline."
                 ),
             })
 
-        for key in (
-            "middle_front",
-            "middle_back",
-            "late",
-        ):
-            current = valid.get(key)
+        current = valid.get("middle_front")
 
-            if current is None:
-                continue
-
-            usable = (
-                p0 >= p_min
-                and p0 > EPS
-            )
-
-            decline = (
-                max(
-                    0.0,
-                    (p0 - current["P"]) / p0,
-                )
-                if usable else None
+        if current is not None:
+            # 恢复原程序定义：
+            # 升高与下降均计入非负相对变动。
+            change = (
+                abs(current["P"] - p0) / p0
+                if p0 > EPS
+                else None
             )
 
             reached = (
-                decline is not None
-                and decline >= decline_min
+                change is not None
+                and change + 1e-12 >= change_min
             )
 
-            if decline is not None:
+            if change is not None:
                 detail = (
-                    f"P: {p0:.4%} -> "
-                    f"{current['P']:.4%}; "
-                    f"relative decline={decline:.2%} "
-                    f">= {decline_min:.2%}"
+                    f"P: {p0:.4%} "
+                    f"-> {current['P']:.4%}; "
+                    f"relative change={change:.2%}; "
+                    f"threshold={change_min:.2%}"
                 )
             else:
                 detail = (
-                    "Reference P is zero or below "
-                    "the configured baseline."
+                    "Relative change is undefined: "
+                    "fitted early P is zero."
                 )
 
             checks.append({
-                "Rule": "P-DECLINE / " + key,
+                "Rule": "MF-P-CHANGE",
                 "Condition": detail,
                 "Reached": reached,
                 "Time (min)": (
@@ -710,50 +758,93 @@ def decide(
 
             if reached:
                 candidates.append({
-                    "code": "P-DECLINE",
-                    "time": current["available_time"],
+                    "code": "MF-P-CHANGE",
+                    "time": (
+                        current["available_time"]
+                    ),
+                    "stage": (
+                        "Middle first-half endpoint "
+                        "(0.45T)"
+                    ),
                     "reason": detail,
                 })
 
-    if not candidates:
-        return {
-            "time": None,
-            "codes": "NONE",
-            "reason": (
-                "No configured trigger was reached "
-                "within the observed record."
-            ),
-            "checks": checks,
-            "candidates": [],
-        }
+    # 恢复原0.65T兜底。
+    fallback_time = 0.65 * duration
+
+    candidates.append({
+        "code": "M-END",
+        "time": fallback_time,
+        "stage": (
+            "Middle endpoint (0.65T)"
+        ),
+        "reason": (
+            "Scheduled backwashing at the retained "
+            "0.65T checkpoint. No earlier configured "
+            "trigger was reached."
+        ),
+    })
 
     first = min(
-        c["time"] for c in candidates
+        c["time"]
+        for c in candidates
     )
 
     winners = [
-        c for c in candidates
+        c
+        for c in candidates
         if abs(c["time"] - first) <= 1e-6
     ]
+
+    # 实际触发与兜底恰好重合时，只将实际条件列为原因。
+    active = [
+        c
+        for c in winners
+        if c["code"] != "M-END"
+    ]
+
+    if active:
+        winners = active
+
+    checks.append({
+        "Rule": "M-END",
+        "Condition": (
+            "Scheduled fallback at 0.65T"
+        ),
+        "Reached": (
+            winners[0]["code"] == "M-END"
+        ),
+        "Time (min)": fallback_time / 60,
+    })
 
     return {
         "time": first,
         "codes": " + ".join(
             dict.fromkeys(
-                c["code"] for c in winners
+                c["code"]
+                for c in winners
             )
         ),
-        "reason": " Simultaneous trigger: ".join(
-            c["reason"] for c in winners
+        "stage": " + ".join(
+            dict.fromkeys(
+                c["stage"]
+                for c in winners
+            )
+        ),
+        "reason": (
+            " Simultaneous trigger: ".join(
+                c["reason"]
+                for c in winners
+            )
         ),
         "checks": checks,
         "candidates": candidates,
     }
 
 
-# ==============================================================================
-# Complete analysis
-# ==============================================================================
+# =============================================================================
+# Complete dataset analysis
+# =============================================================================
 
 @st.cache_data(
     show_spinner=False,
@@ -765,7 +856,7 @@ def analyze(
     filename,
     ratio,
     p_min,
-    decline,
+    change,
     version,
 ):
     t, y, absolute_start = clean_data(raw)
@@ -775,26 +866,24 @@ def analyze(
     duration = float(t[-1])
     j0 = float(y[0])
 
-    definitions = [
+    stage_definitions = [
         (
-            0.0, 0.25,
+            0.0,
+            0.25,
             "Early: 0-25% Tdata",
             "early",
         ),
         (
-            0.25, 0.45,
+            0.25,
+            0.45,
             "Middle front: 25-45% Tdata",
             "middle_front",
         ),
         (
-            0.45, 0.65,
+            0.45,
+            0.65,
             "Middle back: 45-65% Tdata",
             "middle_back",
-        ),
-        (
-            0.65, 1.0,
-            "Late: 65-100% Tdata",
-            "late",
         ),
     ]
 
@@ -807,7 +896,8 @@ def analyze(
             label,
             key,
         )
-        for start, end, label, key in definitions
+        for start, end, label, key
+        in stage_definitions
     ]
 
     ft = flux_crossing(
@@ -822,7 +912,8 @@ def analyze(
         ft,
         ratio,
         p_min,
-        decline,
+        change,
+        duration,
     )
 
     threshold = (
@@ -834,11 +925,18 @@ def analyze(
             "Flux-threshold window",
             "threshold",
         )
-        if ft is not None else None
+        if ft is not None
+        else None
     )
 
-    decision_window = (
-        analyze_window(
+    if (
+        ft is not None
+        and abs(decision["time"] - ft) <= 1e-6
+    ):
+        decision_window = threshold
+
+    else:
+        decision_window = analyze_window(
             t,
             y,
             0.0,
@@ -846,8 +944,6 @@ def analyze(
             "Recommended-time window",
             "decision",
         )
-        if decision["time"] is not None else None
-    )
 
     return {
         "type": kind,
@@ -866,21 +962,52 @@ def analyze(
         "settings": (
             ratio,
             p_min,
-            decline,
+            change,
         ),
         "version": version,
     }
 
 
-# ==============================================================================
-# Presentation helpers
-# ==============================================================================
+# =============================================================================
+# Display helpers
+# =============================================================================
 
 def time_text(t):
     if t is None:
         return "Not reached"
 
-    return f"{t / 60:.2f} min ({t:.2f} s)"
+    return (
+        f"{t / 60:.2f} min "
+        f"({t:.2f} s)"
+    )
+
+
+def strategy(result):
+    if (
+        result is None
+        or not result.get("success", True)
+    ):
+        return (
+            "No valid mechanism estimate is "
+            "available for this window."
+        )
+
+    i = int(np.argmax(result["eta"]))
+
+    if i == 3:
+        return (
+            "Cake filtration is the largest fitted "
+            "contribution. Hydraulic backwashing is "
+            "the first cleaning option to evaluate. "
+            "Actual recovery and any chemical-cleaning "
+            "choice require separate tests and "
+            "membrane-compatibility checks."
+        )
+
+    return (
+        "Select a cleaning strategy using "
+        "independent recovery measurements."
+    )
 
 
 def pie(result, title):
@@ -892,7 +1019,8 @@ def pie(result, title):
     ):
         st.info(
             "No valid fitting window."
-            if result is None else result["error"]
+            if result is None
+            else result["error"]
         )
         return
 
@@ -920,14 +1048,16 @@ def pie(result, title):
             for i in indices
         ],
         colors=[
-            COLORS[i] for i in indices
+            COLORS[i]
+            for i in indices
         ],
         startangle=90,
-        textprops={"fontsize": 9},
+        textprops={
+            "fontsize": 9,
+        },
     )
 
     ax.axis("equal")
-
     st.pyplot(fig)
     plt.close(fig)
 
@@ -949,22 +1079,59 @@ def stage_table(result):
             "Stage": s["label"],
             "Status": (
                 "Completed"
-                if s["success"] else s["error"]
+                if s["success"]
+                else s["error"]
             ),
             "Evaluation time (min)": (
                 s["available_time"] / 60
+            ),
+            "Evaluation time (s)": (
+                s["available_time"]
             ),
         }
 
         if s["success"]:
             row.update({
-                name + " (%)": 100 * s["eta"][i]
+                name + " (%)": (
+                    100 * s["eta"][i]
+                )
                 for i, name in enumerate(NAMES)
             })
 
+            complete, intermediate = (
+                s["eta"][1:3]
+            )
+
+            # 只保留描述性显示，不参与冲洗决策。
+            if intermediate > EPS:
+                diagnostic_ratio = (
+                    complete / intermediate
+                )
+            elif complete > EPS:
+                diagnostic_ratio = np.inf
+            else:
+                diagnostic_ratio = 0.0
+
             row.update({
                 "P (%)": 100 * s["P"],
-                **s["metrics"],
+                "Complete/intermediate (display only)": (
+                    diagnostic_ratio
+                ),
+                "NRMSE": (
+                    s["metrics"]["NRMSE"]
+                ),
+                "MAPE (%)": (
+                    100 * s["metrics"]["MAPE"]
+                ),
+                "R2": (
+                    s["metrics"]["R2"]
+                ),
+                "Observed window start (s)": (
+                    s["t_start"]
+                ),
+                "Observed window end (s)": (
+                    s["t_end"]
+                ),
             })
 
         rows.append(row)
@@ -998,11 +1165,122 @@ def show_result(r):
 
     st.info(decision["reason"])
 
+    st.write(
+        "Selected stage: "
+        + decision["stage"]
+    )
+
     st.caption(
-        f"Parameters used: J/J0={r['settings'][0]:.0%}; "
+        "Parameters used: "
+        f"J/J0={r['settings'][0]:.0%}; "
         f"P baseline={r['settings'][1]:.2%}; "
-        f"P decline={r['settings'][2]:.2%}. "
-        "Times are elapsed from the first retained observation."
+        f"P change={r['settings'][2]:.2%}. "
+        "Times are elapsed from the first "
+        "retained observation."
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown(
+            "**Data and checkpoints**"
+        )
+
+        st.write(
+            "Initial flux J0: {:.6g}".format(
+                r["J0"]
+            )
+        )
+
+        st.write(
+            "Tdata: "
+            + time_text(r["duration"])
+        )
+
+        for fraction in (
+            0.25,
+            0.45,
+            0.65,
+        ):
+            st.write(
+                f"{fraction:.2f}T: "
+                + time_text(
+                    fraction * r["duration"]
+                )
+            )
+
+    with c2:
+        st.markdown(
+            "**Full-process fit**"
+        )
+
+        for name, value in (
+            r["full"]["metrics"].items()
+        ):
+            st.write(
+                f"{name}: {value:.5f}"
+            )
+
+        st.write(
+            "Largest contribution: "
+            "Cake Filtration"
+        )
+
+        st.write(
+            "Cake contribution: "
+            f"{r['full']['eta'][3]:.2%}"
+        )
+
+    with c3:
+        st.markdown(
+            "**Decision basis**"
+        )
+
+        st.write(
+            "Choose the earliest of the hard "
+            "flux threshold, early P baseline, "
+            "P relative change at 0.45T, "
+            "and 0.65T fallback."
+        )
+
+        st.write(
+            "The complete/intermediate ratio "
+            "is descriptive only; it never "
+            "triggers backwashing."
+        )
+
+    references = pd.DataFrame([
+        {
+            "Reference": label,
+            "Elapsed time (s)": (
+                f * r["duration"]
+            ),
+            "Elapsed time (min)": (
+                f * r["duration"] / 60
+            ),
+        }
+        for label, f in [
+            ("Early end: 0.25T", 0.25),
+            (
+                "Middle first-half end: 0.45T",
+                0.45,
+            ),
+            ("Middle end: 0.65T", 0.65),
+            ("Data endpoint: Tdata", 1.0),
+        ]
+    ])
+
+    st.markdown(
+        "**Time references**"
+    )
+
+    st.dataframe(
+        references,
+        use_container_width=True,
+    )
+
+    st.markdown(
+        "**Rule evaluation and actual trigger**"
     )
 
     st.dataframe(
@@ -1011,11 +1289,18 @@ def show_result(r):
     )
 
     st.caption(
-        "'Reached' records whether each condition is met "
-        "in the retrospective record. "
-        "'Actual trigger' reports only the earliest event; "
-        "later conditions are not additional causes of that event."
+        "'Reached' records whether each condition "
+        "is met in the retrospective record. "
+        "'Actual trigger' reports only the "
+        "earliest event; later conditions are "
+        "not additional causes of that event. "
+        "M-END is a scheduled fallback, "
+        "not a mechanism trigger."
     )
+
+    # -------------------------------------------------------------------------
+    # Flux figure
+    # -------------------------------------------------------------------------
 
     fig, ax = plt.subplots(
         figsize=(10, 5)
@@ -1034,8 +1319,84 @@ def show_result(r):
         r["t"] / 60,
         r["full"]["pred"] / r["J0"],
         lw=2,
-        label="Full-process constrained fit",
+        label=(
+            "Full-process constrained fit"
+        ),
     )
+
+    threshold = r["threshold"]
+
+    if (
+        threshold is not None
+        and threshold["success"]
+    ):
+        ax.plot(
+            threshold["t"] / 60,
+            threshold["pred"] / r["J0"],
+            color="#169b62",
+            lw=1.8,
+            label=(
+                "Flux-threshold window fit"
+            ),
+        )
+
+    for fraction in (
+        0.25,
+        0.45,
+        0.65,
+    ):
+        x = (
+            fraction
+            * r["duration"]
+            / 60
+        )
+
+        ax.axvline(
+            x,
+            color="#64748b",
+            ls=":",
+            alpha=0.6,
+        )
+
+        ax.text(
+            x,
+            0.98,
+            f"{fraction:.2f}T",
+            rotation=90,
+            transform=(
+                ax.get_xaxis_transform()
+            ),
+            ha="right",
+            va="top",
+        )
+
+    for start, end, color, label in [
+        (
+            0.0,
+            0.25,
+            "#dcfce7",
+            "Early",
+        ),
+        (
+            0.25,
+            0.45,
+            "#fef9c3",
+            "Middle first half",
+        ),
+        (
+            0.45,
+            0.65,
+            "#fee2e2",
+            "Middle second half",
+        ),
+    ]:
+        ax.axvspan(
+            start * r["duration"] / 60,
+            end * r["duration"] / 60,
+            color=color,
+            alpha=0.3,
+            label=label,
+        )
 
     ax.axhline(
         r["settings"][0],
@@ -1052,16 +1413,15 @@ def show_result(r):
             label="Flux crossing",
         )
 
-    if decision["time"] is not None:
-        ax.axvline(
-            decision["time"] / 60,
-            color="#7952b3",
-            ls="-.",
-            label=(
-                "Selected event: "
-                + decision["codes"]
-            ),
-        )
+    ax.axvline(
+        decision["time"] / 60,
+        color="#7952b3",
+        ls="-.",
+        label=(
+            "Selected event: "
+            + decision["codes"]
+        ),
+    )
 
     ax.set(
         xlabel="Elapsed time (min)",
@@ -1074,6 +1434,10 @@ def show_result(r):
     st.pyplot(fig)
     plt.close(fig)
 
+    # -------------------------------------------------------------------------
+    # Whole-process and threshold-window pies
+    # -------------------------------------------------------------------------
+
     cols = st.columns(2)
 
     with cols[0]:
@@ -1081,40 +1445,82 @@ def show_result(r):
             r["full"],
             "Full-process mechanism contributions",
         )
+        st.write(
+            strategy(r["full"])
+        )
 
     with cols[1]:
         pie(
-            r["decision_window"],
-            "Contributions up to the recommended time",
+            r["threshold"],
+            "Flux-threshold window mechanism contributions",
         )
+        st.write(
+            strategy(r["threshold"])
+        )
+
+    # -------------------------------------------------------------------------
+    # Original three diagnostic windows
+    # -------------------------------------------------------------------------
+
+    st.markdown(
+        "**Industrial-stage mechanism contributions**"
+    )
+
+    table = stage_table(r)
+
+    st.dataframe(
+        table,
+        use_container_width=True,
+    )
+
+    st.caption(
+        "Complete/intermediate is retained as "
+        "a descriptive column only. It is "
+        "excluded from every timing decision."
+    )
+
+    cols = st.columns(3)
+
+    for col, s in zip(
+        cols,
+        r["stages"],
+    ):
+        with col:
+            pie(s, s["label"])
 
     with st.expander(
-        "Stage mechanism contributions and flux-threshold window"
+        "Contributions up to the selected backwashing time"
     ):
-        st.dataframe(
-            stage_table(r),
-            use_container_width=True,
-        )
-
-        for pair_start in range(
-            0,
-            len(r["stages"]),
-            2,
-        ):
-            cols = st.columns(2)
-
-            pair = r["stages"][
-                pair_start:pair_start + 2
-            ]
-
-            for col, s in zip(cols, pair):
-                with col:
-                    pie(s, s["label"])
-
         pie(
-            r["threshold"],
-            "Contributions up to the flux-threshold crossing",
+            r["decision_window"],
+            "Recommended-time window",
         )
+
+        st.write(
+            strategy(r["decision_window"])
+        )
+
+    # -------------------------------------------------------------------------
+    # Downloads
+    # -------------------------------------------------------------------------
+
+    st.download_button(
+        "Download stage results CSV",
+        table.to_csv(
+            index=False
+        ).encode("utf-8-sig"),
+        file_name=(
+            r["type"]
+            + "_stage_results.csv"
+        ),
+        mime="text/csv",
+        key=(
+            "stages_"
+            + r["type"]
+            + "_"
+            + r["file"]
+        ),
+    )
 
     export = {
         "version": VERSION,
@@ -1133,8 +1539,9 @@ def show_result(r):
                 "fit_loss",
             )
         },
-        "stages": stage_table(r).to_dict(
-            "records"
+        "stages": (
+            stage_table(r)
+            .to_dict("records")
         ),
     }
 
@@ -1163,9 +1570,9 @@ def show_result(r):
     )
 
 
-# ==============================================================================
+# =============================================================================
 # Streamlit interface
-# ==============================================================================
+# =============================================================================
 
 def main():
     st.set_page_config(
@@ -1175,21 +1582,26 @@ def main():
     )
 
     st.title(TITLE)
-    st.info(CONSTRAINT_TEXT)
+
+    st.info(
+        CONSTRAINT_TEXT
+    )
 
     st.caption(
         "Retrospective demonstration. "
         "P=complete+intermediate blocking. "
-        "Baseline and decline thresholds are empirical settings. "
-        "All four foulant types use the same three configured rules."
+        "Baseline and relative-change thresholds "
+        "are empirical settings. All four foulant "
+        "types use the same configured rules, "
+        "with the retained 0.65T scheduled fallback."
     )
 
     ratio = st.sidebar.slider(
         "Hard flux threshold (% of initial flux)",
-        50.0,
-        70.0,
-        70.0,
-        1.0,
+        min_value=50.0,
+        max_value=70.0,
+        value=50.0,
+        step=1.0,
         help=(
             "70% J0 means a 30% flux decline; "
             "50% J0 means a 50% decline."
@@ -1197,30 +1609,41 @@ def main():
     ) / 100
 
     p_min = st.sidebar.slider(
-        "Early P baseline (%)",
-        0.0,
-        1.87,
-        1.0,
-        0.01,
+        "Early Pore-Mouth Blocking Minimum (%)",
+        min_value=0.0,
+        max_value=1.87,
+        value=1.0,
+        step=0.01,
         format="%.2f",
         help=(
             "Early P below this value independently "
-            "triggers at the early endpoint."
+            "triggers at the early endpoint, 0.25T, "
+            "unless an earlier flux trigger occurs."
         ),
     ) / 100
 
-    decline = st.sidebar.slider(
-        "P relative decline trigger (%)",
-        24.22,
-        100.0,
-        25.0,
-        0.01,
+    change = st.sidebar.slider(
+        "Pore-Mouth Blocking Relative Change Trigger (%)",
+        min_value=24.22,
+        max_value=100.0,
+        value=25.0,
+        step=0.01,
         format="%.2f",
         help=(
-            "max(0, (P_early-P_current)/P_early). "
-            "Increases do not trigger."
+            "At 0.45T only: "
+            "abs(P_middle_front-P_early)/P_early. "
+            "Increases and decreases both count. "
+            "The denominator is the fitted early P, "
+            "not the baseline setting."
         ),
     ) / 100
+
+    st.sidebar.caption(
+        "Checkpoints: 0.25T, 0.45T, 0.65T. "
+        "T is the retained time-series duration "
+        "after preprocessing. No separate "
+        "late-stage timing trigger is added."
+    )
 
     mode = st.sidebar.selectbox(
         "Analysis mode",
@@ -1255,22 +1678,27 @@ def main():
         VERSION,
         ratio,
         p_min,
-        decline,
+        change,
         mode,
         kind,
         (
             upload.getvalue()
-            if upload is not None else None
+            if upload is not None
+            else None
         ),
     )
 
-    if st.sidebar.button("Clear results"):
+    if st.sidebar.button(
+        "Clear results"
+    ):
         st.session_state.pop(
             "analysis_bundle",
             None,
         )
 
-    if st.button("Start analysis"):
+    if st.button(
+        "Start analysis"
+    ):
         output = []
 
         kinds = (
@@ -1283,7 +1711,9 @@ def main():
             mode == "Upload CSV"
             and upload is None
         ):
-            st.error("Select a CSV first.")
+            st.error(
+                "Select a CSV first."
+            )
             return
 
         with st.spinner(
@@ -1295,21 +1725,21 @@ def main():
                         raw = upload.getvalue()
                         filename = upload.name
                     else:
-                        raw, filename = load_preset(
-                            selected
+                        raw, filename = (
+                            load_preset(selected)
                         )
 
-                    output.append(
-                        analyze(
-                            raw,
-                            selected,
-                            filename,
-                            ratio,
-                            p_min,
-                            decline,
-                            VERSION,
-                        )
+                    result = analyze(
+                        raw,
+                        selected,
+                        filename,
+                        ratio,
+                        p_min,
+                        change,
+                        VERSION,
                     )
+
+                    output.append(result)
 
                 except Exception as exc:
                     output.append({
@@ -1338,33 +1768,64 @@ def main():
         )
         return
 
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+
     summary = []
 
     for r in bundle[1]:
         if "error" in r:
             st.error(
-                r["type"] + ": " + r["error"]
+                r["type"]
+                + ": "
+                + r["error"]
             )
             continue
 
         summary.append({
             "Foulant": r["type"],
             "File": r["file"],
+            "Initial flux J0": r["J0"],
+            "Tdata (s)": r["duration"],
+            "0.25T (s)": (
+                0.25 * r["duration"]
+            ),
+            "0.45T (s)": (
+                0.45 * r["duration"]
+            ),
+            "0.65T (s)": (
+                0.65 * r["duration"]
+            ),
+            "Selected stage": (
+                r["decision"]["stage"]
+            ),
             "Recommended time (min)": (
                 r["decision"]["time"] / 60
-                if r["decision"]["time"] is not None
-                else np.nan
             ),
-            "Actual trigger": r["decision"]["codes"],
-            "Reason": r["decision"]["reason"],
+            "Recommended time (s)": (
+                r["decision"]["time"]
+            ),
+            "Actual trigger": (
+                r["decision"]["codes"]
+            ),
+            "Reason": (
+                r["decision"]["reason"]
+            ),
             "Flux-threshold time (min)": (
                 r["flux_time"] / 60
                 if r["flux_time"] is not None
                 else np.nan
             ),
-            "Flux threshold (%)": 100 * ratio,
-            "P baseline (%)": 100 * p_min,
-            "P decline threshold (%)": 100 * decline,
+            "Flux threshold (%)": (
+                100 * ratio
+            ),
+            "P baseline (%)": (
+                100 * p_min
+            ),
+            "P relative-change threshold (%)": (
+                100 * change
+            ),
             "Cake contribution (%)": (
                 100 * r["full"]["eta"][3]
             ),
@@ -1377,7 +1838,9 @@ def main():
         })
 
     if summary:
-        table = pd.DataFrame(summary)
+        table = pd.DataFrame(
+            summary
+        )
 
         st.dataframe(
             table,
@@ -1394,6 +1857,10 @@ def main():
             ),
             mime="text/csv",
         )
+
+    # -------------------------------------------------------------------------
+    # Detailed reports
+    # -------------------------------------------------------------------------
 
     for r in bundle[1]:
         if "error" not in r:
