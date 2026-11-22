@@ -6,7 +6,7 @@ Membrane Fouling and Cleaning Insight Platform
 1. 保留0.25T、0.45T、0.65T阶段检查及展示。
 2. 仅删除“完全堵塞/中间堵塞 > 1”的冲洗触发规则。
 3. 通量阈值范围50%–70% J0，默认50% J0。
-4. P基线范围0–1.87%，默认1%。
+4. P基线范围0–1.33%，默认1%。
 5. P相对变动幅度范围24.22%–100%，默认25%。
 6. 恢复原始相对变动定义：
    abs(P_middle_front - P_early) / P_early
@@ -1611,7 +1611,7 @@ def main():
     p_min = st.sidebar.slider(
         "Early Pore-Mouth Blocking Minimum (%)",
         min_value=0.0,
-        max_value=1.87,
+        max_value=1.33,
         value=1.0,
         step=0.01,
         format="%.2f",
